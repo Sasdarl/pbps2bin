@@ -118,10 +118,10 @@ def unpack(buf, folder, model):
                         outpath = (f"{outfolder}unknown2.{outext}")
                 else:
                     outpath = (f"{outfolder}{j}.{outext}")
-                    if i == 12 and j == 0: # I wish I knew why too
+                    if i == 12 and j == 0 and dataOffset == 0x29D2000: # I wish I knew why too
                         outpath = (f"{folder}27/{j}.{outext}")
                         Path(f"{folder}27/").mkdir(parents=True,exist_ok=True)
-                    if i == 27 and j == 0:
+                    if i == 27 and j == 0 and dataOffset == 0x52A800:
                         outpath = (f"{folder}12/{j}.{outext}")
                 with open(outpath, "wb") as outfile:
                     for byte in fileData:
