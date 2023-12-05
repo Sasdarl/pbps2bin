@@ -248,7 +248,7 @@ parser.add_argument("inpath", help="File Input (BIN)") # But I do
 parser.add_argument("-o", "--outpath", help="Optional. The name used for the output folder or file.")
 parser.add_argument("-nc", "--nocompress", action="store_true", help="Optional. Disables ZLib compression on files within the BIN.") # For if you want the chunkiest possible game directory
 parser.add_argument("-m", "--model", action="store_true", help="Optional. Indicates a BIN file is formatted for model files.") # There are BIN files inside BIN files. It gets weirder
-parser.add_argument("-q", "--qbextensions", action="store_true", help="Optional. Gives PGM and DAT extensions in place of TEX/TX2 and LXE.") # For compatibility and nostalgia
+parser.add_argument("-qb", "--qbextensions", action="store_true", help="Optional. Gives PGM and DAT extensions in place of TEX/TX2 and LXE.") # For compatibility and nostalgia
 args = parser.parse_args()
 if Path(args.inpath).is_file() and not Path(args.inpath).is_dir(): # BIN input is assumed   
     with open(args.inpath, "rb") as input_file:
