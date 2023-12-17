@@ -1,10 +1,6 @@
-import os
-import sys
 import struct
 import argparse
-import subprocess
 import zlib
-import re
 
 from pathlib import Path
 
@@ -47,15 +43,19 @@ def determineExtension(buf): # QuickBMS's extensions are iconic but I'm in charg
             return "pgm"
         else:
             return "tx2" # I made this one up
-    elif magicString == "FMT0":
-        return "fmt" 
+    elif magic == bytearray([0x00, 0x10, 0x00, 0x10]): # Camera info for battle intros
+        return "cam"
     elif magic == bytearray([0x21, 0x01, 0xF0, 0xFF]): # Commonly known as DAT
         if args.qbextensions:
             return "dat"
         else:
             return "lxe"
+    elif buf[0:8] == bytearray([0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]): # Portrait overlays
+        return "lxe"
     elif len(magicString) == 3:
         return magicString.lower() # But otherwise the file itself probably knows best
+    elif len(magicString) == 4 and magicString[3] == "0":
+        return magicString[0:3].lower()
     else:
         return "bin"
 
