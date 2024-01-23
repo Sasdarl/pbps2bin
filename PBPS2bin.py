@@ -219,7 +219,7 @@ def rebuild(folder,output,compress,useFilelist):
             file = Path(f"{Path(folder)}//{listNames[i]}")
             if file.is_file() and not file.is_dir():
                 folderOffsets[curFolder].insert(int(listPositions[i].rsplit("/")[1]),len(fileheader))
-                add_file(file,databuffer,fileheader,curFolder,compress)
+                add_file(file,databuffer,fileheader,curFolder+1,compress)
                 fileheader.extend(wu16(idArray[i])) # Put whatever this is there
                 fileheader.extend(wu32(0))
             if i >= 199 and (i+1)%200 == 0: # Update the user on our progress
