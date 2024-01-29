@@ -9,6 +9,6 @@ Optional parameters:
 
 **-m (--model):** Treats the BIN file to be unpacked or rebuilt as a model file.
 
-**-qb (--qbextensions):** Applies the more commonly-assumed "PGM" and "DAT" extensions to TEX and LXE files respectively.
+**-qb (--qbextensions):** Applies the more commonly-assumed "PGM" and "DAT" extensions to TEX and LXE files respectively. Only functions when there is no filelist or **--nolist** is set.
 
 **-nl (--nolist):** Ignores the provided file list (filelist.txt) if it is available, instead exporting folders and files by zero-indexed number.
