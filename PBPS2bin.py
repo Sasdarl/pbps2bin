@@ -70,9 +70,12 @@ def numsort(str): # Because default numeric string sorting is the worst
 
 def unpack(buf, folder, model, useFilelist):
     folderCount = ru32(buf,0x00) # Number of folders
+    effModel = False
+    if model and ru32(buf,0x08) != 0x20031205:
+        effModel = True
     listPositions = []
     listNames = []
-    if useFilelist:
+    if useFilelist and not model:
         with open("./filelist.txt") as filelist:
             lines = filelist.readlines()
             for line in lines:
@@ -80,7 +83,7 @@ def unpack(buf, folder, model, useFilelist):
                     listPositions.append(line.rsplit(":",1)[0]) # Store positions and names in two arrays
                     line = line.rsplit(":",1)[1]
                     listNames.append(line.rsplit("\n")[0].strip("\""))
-    if model:
+    if effModel:
         folderOffset = 0x04
         dataOffset = folderCount*0x10+0x04
     else:
@@ -88,17 +91,17 @@ def unpack(buf, folder, model, useFilelist):
         folderOffset = 0x10
         fileOffset = folderCount*0x10+0x10
     for i in range(folderCount):
-        if model:
+        if effModel:
             fileCount = 4
         else:
             dataOffset = ru32(buf,folderOffset)
             fileCount = ru32(buf,folderOffset+4)
             print(f"Folder {i}: {fileCount} files")
         outfolder = (f"{folder}{i}/")
-        if not useFilelist: # Make numeric directories
+        if not useFilelist or model: # Make numeric directories
             Path(outfolder).mkdir(parents=True,exist_ok=True) # If we have a file list, we don't need them
         for j in range(fileCount):
-            if model:
+            if effModel:
                 fileOffset = folderOffset+j*0x04
                 dataSize = ru32(buf,fileOffset)
                 if dataSize > 0:
@@ -120,7 +123,7 @@ def unpack(buf, folder, model, useFilelist):
                     fileData = buf[dataOffset:dataOffset+dataSize]
             if len(fileData) > 0:
                 outext = determineExtension(fileData)
-                if model:
+                if effModel:
                     if j == 0: # Might as well name them
                         outpath = (f"{outfolder}model.{outext}")
                     elif j == 1:
@@ -128,7 +131,7 @@ def unpack(buf, folder, model, useFilelist):
                     elif j == 2: # If someone figures out what these are, let me know
                         outpath = (f"{outfolder}unknown.{outext}")
                     else:
-                        outpath = (f"{outfolder}unknown2.{outext}")
+                        outpath = (f"{outfolder}unknown{j-1}.{outext}")
                 else:
                     outpath = (f"{outfolder}{j}.{outext}")
                     if i == 12 and j == 0 and dataOffset == 0x29D2000: # I wish I knew why too
@@ -137,7 +140,7 @@ def unpack(buf, folder, model, useFilelist):
                             Path(f"{folder}27/").mkdir(parents=True,exist_ok=True)
                     if i == 27 and j == 0 and dataOffset == 0x52A800:
                         outpath = (f"{folder}12/{j}.{outext}")
-                    if useFilelist:
+                    if useFilelist and not model:
                         found = False
                         search = (f"{i}/{j}")
                         if i == 12 and j == 0 and dataOffset == 0x29D2000:
@@ -157,14 +160,14 @@ def unpack(buf, folder, model, useFilelist):
                 with open(outpath, "wb") as outfile:
                     for byte in fileData:
                         outfile.write(struct.pack("B",byte))
-                if not model: # Just so the user knows we're not stuck
+                if not effModel: # Just so the user knows we're not stuck
                     fileOffset += 0x10
                     if j >= 499 and (j+1)%100 == 0:
                         print(f"Please wait. {j+1} files complete...", end="\r", flush=True)
                     if j > 499 and j == fileCount - 1:
                         print(f"Please wait. {j+1} files complete.  ")
         folderOffset += 0x10
-    if not model:
+    if not effModel:
         outid = (f"{folder}filelist.id")
         with open(outid, "wb") as id_file: # These aren't necessary but until I figure out how they're calculated
             id_file.write(idArray) # this will have to do
@@ -346,9 +349,12 @@ elif Path(args.inpath).is_dir(): # BIN output is assumed
         outpath = args.outpath
     else:
         outpath = (f"{Path(args.inpath).stem}.bin")
-    if args.model:
+    if args.model and not Path(f"{Path(args.inpath)}/filelist.id").exists():
         rebuild_model(args.inpath,outpath)
     else:
         compress = not args.nocompress
+        if args.model:
+            args.nolist = True
+            compress = False
         rebuild(args.inpath,outpath,compress, not args.nolist)
     print(f"Rebuilt BIN to {outpath}")
