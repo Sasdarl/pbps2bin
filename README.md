@@ -5,10 +5,10 @@ Optional parameters:
 
 **-o (--outpath):** Set a folder name or filename for the output.
 
-**-nc (--nocompress):** Disable ZLib compression on the rebuilt BIN file. Allows for direct access with a hex editor in exchange for free space and disc image reinsertion.
+**-nc (--nocompress):** Disable ZLib compression on the rebuilt BIN file. Allows for direct access with a hex editor, in exchange for free space and disc image reinsertion.
 
-**-m (--model):** Treats the BIN file to be unpacked or rebuilt as a model file.
+**-m (--model):** Treat the BIN file to be unpacked or rebuilt as a model file.
 
-**-qb (--qbextensions):** Applies the more commonly-assumed "PGM" and "DAT" extensions to TEX and LXE files respectively. Only functions when there is no filelist or **--nolist** is set.
+**-q (--qbextensions):** Apply the more commonly-assumed "PGM" and "DAT" extensions to TEX and LXE files respectively. Only functions when there is no filelist or **--nolist** is set.
 
-**-nl (--nolist):** Ignores the provided file list (filelist.txt) if it is available, instead exporting folders and files by zero-indexed number.
+**-nl (--nolist):** Ignore the provided file list (filelist.txt) if it is available. Folders and files will instead be exported by zero-indexed number.
