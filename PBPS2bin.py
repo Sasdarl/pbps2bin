@@ -27,26 +27,26 @@ def deZLib(buf,offset,size): # Decompress a ZLib-compressed file
     decompressed = zlib.decompress(localBuffer)
     return bytes(decompressed) # Array of byte integers
 
-def determineExtension(buf): # QuickBMS's extensions are iconic but I'm in charge here so we use internal filenames
+def determineExtension(buf, qbFile): # QuickBMS's extensions are iconic but I'm in charge here so we use internal filenames
     magic = buf[0:4]
     if magic[0:3].isalnum():
         magicString = magic.decode("UTF-8").rstrip("\x00")
     else:
         magicString = ""
     if magicString == "P2TX": # Commonly known as PGM
-        if args.qbextensions:
+        if qbFile:
             return "pgm"
         else:
             return "tex"
     elif magicString == "TEX2": # Commonly known as nothing
-        if args.qbextensions:
+        if qbFile:
             return "pgm"
         else:
             return "tx2" # I made this one up
     elif magic == bytearray([0x00, 0x10, 0x00, 0x10]): # Camera info for battle intros
         return "cam" # Cutscenes use a format called "lcm" but it's not the same one
     elif magic == bytearray([0x21, 0x01, 0xF0, 0xFF]) or buf[0:8] == bytearray([0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]): # Commonly known as DAT
-        if args.qbextensions: # The title screen files in particular have no headers
+        if qbFile: # The title screen files in particular have no headers
             return "dat"
         else:
             return "lxe"
@@ -68,7 +68,7 @@ def numsort(str): # Because default numeric string sorting is the worst
         numstr = "0" + numstr # God help those who decide to put 18 zeroes in front of a filename
     return numstr
 
-def unpack(buf, folder, model, useFilelist):
+def unpack(buf, folder, model, useFilelist, qbFile):
     folderCount = ru32(buf,0x00) # Number of folders
     effModel = False
     if model and ru32(buf,0x08) != 0x20031205:
@@ -122,7 +122,7 @@ def unpack(buf, folder, model, useFilelist):
                 else:
                     fileData = buf[dataOffset:dataOffset+dataSize]
             if len(fileData) > 0:
-                outext = determineExtension(fileData)
+                outext = determineExtension(fileData,qbFile)
                 if effModel:
                     if j == 0: # Might as well name them
                         outpath = (f"{outfolder}model.{outext}")
@@ -339,7 +339,7 @@ if Path(args.inpath).is_file() and not Path(args.inpath).is_dir(): # BIN input i
             else:
                 outpath = (f"{Path(args.inpath).parent}/{Path(args.inpath).stem}/")
         Path(outpath).mkdir(parents=True,exist_ok=True)
-        unpack(input_file_buffer,outpath,args.model,not args.nolist)
+        unpack(input_file_buffer,outpath,args.model,not args.nolist,not args.qbextensions)
         input_file.close()
         print(f"Unpacked BIN to {outpath}")
 
