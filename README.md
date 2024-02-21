@@ -12,3 +12,5 @@ Optional parameters:
 **-q (--qbextensions):** Apply the more commonly-assumed "PGM" and "DAT" extensions to TEX and LXE files respectively. Only functions when there is no filelist or **--nolist** is set.
 
 **-nl (--nolist):** Ignore the provided file list (filelist.txt) if it is available. Folders and files will instead be exported by zero-indexed number.
+
+**-fo, -fi (--folder, --file):** Extract only a desired file, or all files in a desired folder.
