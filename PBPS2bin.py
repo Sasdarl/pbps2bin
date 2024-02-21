@@ -339,7 +339,7 @@ if Path(args.inpath).is_file() and not Path(args.inpath).is_dir(): # BIN input i
             else:
                 outpath = (f"{Path(args.inpath).parent}/{Path(args.inpath).stem}/")
         Path(outpath).mkdir(parents=True,exist_ok=True)
-        unpack(input_file_buffer,outpath,args.model,not args.nolist,not args.qbextensions)
+        unpack(input_file_buffer,outpath,args.model,not args.nolist,args.qbextensions)
         input_file.close()
         print(f"Unpacked BIN to {outpath}")
 
