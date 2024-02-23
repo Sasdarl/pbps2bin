@@ -27,7 +27,7 @@ def deZLib(buf, offset, size): # Decompress a ZLib-compressed file
     decompressed = zlib.decompress(localBuffer)
     return bytes(decompressed) # Array of byte integers
 
-def determineExtension(buf, qbFile): # QuickBMS's extensions are iconic but I'm in charge here so we use internal filenames
+def determineExtension(buf, qbFile): # QuickBMS's extensions are iconic but I'm in charge here so we use internal filenames by default
     magic = buf[0:4]
     if magic[0:3].isalnum():
         magicString = magic.decode("UTF-8").rstrip("\x00")
@@ -51,7 +51,10 @@ def determineExtension(buf, qbFile): # QuickBMS's extensions are iconic but I'm 
         else:
             return "lxe"
     elif buf[0:8] == bytearray([0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]): # Portrait overlays
-        return "lxe"
+        if qbFile:
+            return "dat"
+        else:
+            return "lxe"
     elif len(magicString) == 3:
         return magicString.lower() # But otherwise the file itself probably knows best
     elif len(magicString) == 4 and magicString[3] == "0":
@@ -70,7 +73,7 @@ def numsort(str): # Because default numeric string sorting is the worst
         return -1 # And if not, lowest priority
 
 def get_align_difference(num, alignment=0x800): # Get alignment difference for padding purposes
-    difference = alignment-(num%alignment)
+    difference = (alignment-(num%alignment))%alignment
     return difference
     
 def parse_filelist(infile): # Convert the filelist into a two-dimensional array
@@ -101,6 +104,7 @@ def parse_header(buf,folderCount,effModel=False): # Convert the header into a tw
     for i in range(folderCount):
         outarray.append([]) # Set up inner array
         if effModel:
+            fileOffset = folderOffset
             fileCount = 4
         else:
             fileOffset = ru32(buf,folderOffset) # This only needs to exist in files with variable folders
@@ -112,7 +116,7 @@ def parse_header(buf,folderCount,effModel=False): # Convert the header into a tw
                 filearray.append(ru32(buf,fileOffset))
                 filearray.append(0) # There's no flag for this
                 filearray.append(0) # This isn't in the format
-                dataOffset += ru32(fileOffset)
+                dataOffset += ru32(buf,fileOffset)
                 fileOffset += 0x04
             else:
                 dataOffset = ru32(buf,fileOffset)
@@ -149,9 +153,9 @@ def get_file_data(buf,offset,size,compressed=0): # Get (and decompress if necess
             fileData = []
     return fileData
 
-def get_file_name(buffer,folder,file,filelist=[],effModel=False,qbFile=False,noFolder=False): # Determine the path where the file should be stored
+def get_file_name(buffer,folder,file,filelist=[],model=False,qbFile=False,noFolder=False): # Determine the path where the file should be stored
     outext = determineExtension(buffer,qbFile)
-    if effModel:
+    if model:
         if file == 0: # Might as well name them
             outpath = (f"model.{outext}")
         elif file == 1:
@@ -167,14 +171,97 @@ def get_file_name(buffer,folder,file,filelist=[],effModel=False,qbFile=False,noF
             outpath = (f"{filelist[folder][file][3]}")
             if not noFolder:
                 outpath = (f"{filelist[folder][file][2]}/{outpath}")
+        elif not noFolder:
+            outpath = (f"{folder}/{file}.{outext}")
         else:
-            if not noFolder:
-                outpath = (f"{folder}/{file}.{outext}")
-            else:
-                outpath = (f"{folder}_{file}.{outext}")
+            outpath = (f"{folder}_{file}.{outext}")
     return outpath
 
-def extract_file(buf, folder, lookFolder, lookFile, model=False, useFilelist=True, qbFile=False):
+def append_file(input,databuffer,folder,compress=True,effModel=False): # Add file to the end of the buffer
+    with open(input, "rb") as input_file:
+        fileData = bytearray( input_file.read() )
+        fileSize = len(fileData)
+        if not effModel and (compress or folder == 8): # Game can go into an infinite loop otherwise
+            fileData = zlib.compress(fileData)
+            databuffer.extend(wu32(fileSize))
+            databuffer.extend(fileData)
+            fileSize = len(fileData)+4
+        else:
+            databuffer.extend(fileData)
+        input_file.close()
+    if not effModel:
+        databuffer.extend(bytearray(get_align_difference(fileSize))) # PS2 games would take a bullet to be 0x800-aligned
+    return fileSize
+
+def modify_header(buf, folder, file, newsize, compress=True, effModel=False): # Adjust header to change one file's size
+    if effModel:
+        fileOffset = 0x04+(folder*0x10)+(file*0x04) # List of sizes
+        buf[fileOffset:fileOffset+4] = wu32(newsize) # Just find the one we need and change it
+    else:
+        folderCount = ru32(buf,0)
+        difference = 0 # This will keep track of how much we need to adjust things by
+        for i in range(folderCount-folder): # Skip to the folder we need. We'll make up for it as we go
+            fileOffset = ru32(buf, 0x10+(i+folder)*0x10)
+            fileCount = ru32(buf, 0x14+(i+folder)*0x10)
+            for j in range(fileCount):
+                curFile = fileOffset+(0x10*j) # Find the offset for the file
+                if i == 0 and j <= file: # Don't do anything until we get to the replacement file
+                    if j == file: # We're at the replacement file
+                        curFileSize = ru32(buf,curFile+4)+get_align_difference(ru32(buf,curFile+4))
+                        difference += newsize+get_align_difference(newsize) # Calculate difference
+                        difference -= curFileSize
+                        buf[curFile+4:curFile+8] = wu32(newsize)
+                        if compress or folder == 8: # Set compression flag
+                            buf[curFile+8:curFile+10] = wu16(0x2000)
+                        else:
+                            buf[curFile+8:curFile+10] = wu16(0)
+                else: # This runs for all files after the replacement
+                    curFileOffset = ru32(buf,curFile)
+                    buf[curFile:curFile+4] = wu32(curFileOffset+difference) # Add the difference
+    return 0
+
+def rebuild_header(headerarray, effModel=False): # Reconstruct a BIN file header from a two-dimensional array
+    newheader = bytearray(0)
+    newheader.extend(wu32(len(headerarray))) # Both types start with the number of folders
+
+    if not effModel:
+        folderheader = bytearray(0) # We have to iterate over the folders to calculate the header length
+        foldersLength = 0x10+(len(headerarray)*0x10) # And we need the header length to iterate over the files
+        headerLength = foldersLength # It's very much a catch-22
+        for folder in headerarray:
+            folderheader.extend(wu32(headerLength)) # Folder header line
+            folderheader.extend(wu32(len(folder)))
+            folderheader.extend(wu32(0))
+            folderheader.extend(wu32(0))
+            headerLength += 0x10*len(folder) # Allocate space for the files in the folder
+        newheader.extend(wu32(headerLength))
+        newheader.extend(wu32(0x20031205)) # Unused value. Possibly a build date for the original software?
+        newheader.extend(wu32(0))
+        newheader.extend(folderheader) # Add our folder header to the overall header
+        fileLength = headerLength+get_align_difference(headerLength) # Used to calculate file offsets
+    
+    for i in range(len(headerarray)):
+        for j in range(len(headerarray[i])):
+            setFile = headerarray[i][j]
+            if not effModel:
+                newheader.extend(wu32(fileLength)) # Data offset
+            newheader.extend(wu32(setFile[1])) # The special case eff.bin only uses file sizes
+            if not effModel:
+                newheader.extend(wu16(setFile[2]*0x2000)) # Compression
+                newheader.extend(wu16(setFile[3])) # Special "ID"
+                newheader.extend(wu32(0))
+                fileLength += setFile[1] # Increment by file size including padding
+                fileLength += get_align_difference(setFile[1])
+        while effModel and j < 3:
+            newheader.extend(wu32(0)) # eff.bin demands four files a folder
+            j += 1
+
+    if not effModel:
+        padding = bytearray(get_align_difference(headerLength)) # Alignment
+        newheader.extend(padding)
+    return newheader
+
+def extract_file(buf, folder, lookFolder, lookFile, model=False, useFilelist=True, qbFile=False, fileName=""):
     folderCount = ru32(buf,0x00) # Number of folders
     effModel = False
     if lookFolder > (folderCount - 1): # Does the folder exist?
@@ -182,31 +269,67 @@ def extract_file(buf, folder, lookFolder, lookFile, model=False, useFilelist=Tru
         return -1
     if model and ru32(buf,0x08) != 0x20031205: # 9/0 (game/eff/eff.bin) is a unique case
         effModel = True
+        compress = False
 
     lines = [] # Set up our filelist
-    if useFilelist and not model:
+    if useFilelist:
         lines = parse_filelist("./filelist.txt")
 
     files = parse_header(buf,folderCount,effModel) # Set up our directory structure
     
     if lookFile > len(files[lookFolder]): # Does the file exist?
-        print(f"Invalid file {lookFolder}/{lookFile}: There are only {len(files[lookFolder])} files in this folder!")
+        print(f"Invalid file {lookFolder}/{lookFile}: There are only {len(files[lookFolder])} file(s) in this folder!")
         return -1
-    print(f"Accessing folder {lookFolder} ({len(files[lookFolder])} file(s))...")
     getFile = files[lookFolder][lookFile]
     fileData = get_file_data(buf,getFile[0],getFile[1],getFile[2]) # Put the file data in a buffer
 
     if len(fileData) > 0: # But does the file ACTUALLY exist?
-        outpath = get_file_name(fileData,lookFolder,lookFile,lines,effModel,qbFile,True) # Get the best file name
-        Path(f"{folder}{outpath}").parent.mkdir(parents=True,exist_ok=True) # Make the folder required
-        with open(f"{folder}{outpath}", "wb") as outfile:
+        if len(fileName) > 0:
+            outpath = (f"{folder}{fileName}") # It's important that we allow ourselves to be passed a name for one file
+        else: # Otherwise, get the best file name
+            outpath = get_file_name(fileData,lookFolder,lookFile,lines,model,qbFile,True)
+            outpath = (f"{folder}{outpath}")
+        Path(outpath).parent.mkdir(parents=True,exist_ok=True)
+        with open(outpath, "wb") as outfile:
             for byte in fileData:
                 outfile.write(struct.pack("B",byte))
-        print(f"Successfully extracted to {outpath}.")
         return 0
     else:
         print(f"Invalid file {lookFolder}/{lookFile}: The file you are looking for does not exist!")
         return -1
+
+def insert_file(buf, input, output, repFolder, repFile, model=False, compress=True):
+    effModel = False
+    if model and ru32(buf,0x08) != 0x20031205: # 9/0 (game/eff/eff.bin) is a unique case
+        effModel = True
+        compress = False
+
+    if effModel:
+        folderCount = ru32(buf,0)
+        fileOffset = 0x04
+        dataOffset = fileOffset+(0x10*folderCount)
+        for i in range(repFolder*4+repFile-1): # Once again: it is a series of file sizes
+            dataOffset += ru32(fileOffset)
+            fileOffset += 0x04
+        fileSize = ru32(buf, fileOffset)
+        afterBuffer = buf[dataOffset+fileSize::] # Buffer for everything after the original file
+    else:
+        fileOffset = ru32(buf, 0x10+(repFolder*0x10)) # We just need the offset and size of the file we're replacing
+        fileOffset += repFile*0x10
+        dataOffset = ru32(buf, fileOffset)
+        fileSize = ru32(buf, fileOffset+4)
+        fileSizeRounded = fileSize + get_align_difference(fileSize)
+        afterBuffer = buf[dataOffset+fileSizeRounded::] # Buffer for everything after the original file
+
+    newBuffer = buf[0:dataOffset] # Buffer for everything before the original file
+    fileSize = append_file(Path(input),newBuffer,repFolder,compress,effModel) # Append the new file to the first buffer
+    newBuffer.extend(afterBuffer) # And stick the second buffer back on afterward
+
+    modify_header(newBuffer,repFolder,repFile,fileSize,compress,effModel) # Finally, adjust the header
+    with open(output, "wb") as output_file:
+        for byte in newBuffer:
+            output_file.write(struct.pack("B",byte))
+    return 0
 
 def unpack(buf, folder, model=False, useFilelist=True, qbFile=False):
     folderCount = ru32(buf,0x00) # Number of folders
@@ -214,16 +337,17 @@ def unpack(buf, folder, model=False, useFilelist=True, qbFile=False):
     effModel = False
     if model and ru32(buf,0x08) != 0x20031205: # 9/0 (game/eff/eff.bin) is a unique case
         effModel = True
+        compress = False
 
     lines = [] # Set up our filelist
-    if useFilelist and not model:
+    if useFilelist:
         lines = parse_filelist("./filelist.txt")
 
     files = parse_header(buf,folderCount,effModel) # Set up our directory structure
 
     getFile = []
     for i in range(folderCount):
-        print(f"Folder {i}: {len(files[i])} files")
+        print(f"Folder {i}: {len(files[i])} file(s)")
         for j in range(len(files[i])):
             getFile = files[i][j]
             fileData = get_file_data(buf,getFile[0],getFile[1],getFile[2]) # Put the file data in a buffer
@@ -232,9 +356,9 @@ def unpack(buf, folder, model=False, useFilelist=True, qbFile=False):
                 curFolder = i
                 if i == 12 and j == 0 and getFile[0] == 0x29D2000: # We already got the switched file
                     curFolder = 27 # But we still need the switched name
-                if i == 27 and j == 0 and getFile[0] == 0x52A800:
+                elif i == 27 and j == 0 and getFile[0] == 0x52A800:
                     curFolder = 12
-                outpath = get_file_name(fileData,curFolder,j,lines,effModel,qbFile) # Get the best file name
+                outpath = get_file_name(fileData,curFolder,j,lines,model,qbFile) # Get the best file name
                 Path(f"{folder}{outpath}").parent.mkdir(parents=True,exist_ok=True) # Make the folder required
                 with open(f"{folder}{outpath}", "wb") as outfile:
                     for byte in fileData:
@@ -252,79 +376,27 @@ def unpack(buf, folder, model=False, useFilelist=True, qbFile=False):
             id_file.close()
     return 0
 
-def modify_header(buf, folder, file, newsize, effModel=False):
-    return -1
-
-def rebuild_header(headerarray, effModel=False): # Reconstruct a BIN file header from a two-dimensional array
-    newheader = bytearray(0)
-    newheader.extend(wu32(len(headerarray))) # Both types start with the number of folders
-    if not effModel:
-        folderheader = bytearray(0) # We have to iterate over the folders to calculate the header length
-        foldersLength = 0x10+(len(headerarray)*0x10) # And we need the header length to iterate over the files
-        headerLength = foldersLength # It's very much a catch-22
-        for folder in headerarray:
-            folderheader.extend(wu32(headerLength)) # Folder header line
-            folderheader.extend(wu32(len(folder)))
-            folderheader.extend(wu32(0))
-            folderheader.extend(wu32(0))
-            headerLength += 0x10*len(folder) # Allocate space for the files in the folder
-        newheader.extend(wu32(headerLength))
-        newheader.extend(wu32(0x20031205)) # Unused value. Possibly a build date for the original software?
-        newheader.extend(wu32(0))
-        newheader.extend(folderheader) # Add our folder header to the overall header
-        fileLength = headerLength+get_align_difference(headerLength) # Used to calculate file offsets
-    for i in range(len(headerarray)):
-        for j in range(len(headerarray[i])):
-            setFile = headerarray[i][j]
-            if not effModel:
-                newheader.extend(wu32(fileLength)) # Data offset
-            newheader.extend(wu32(setFile[1])) # The special case eff.bin only uses file sizes
-            if not effModel:
-                newheader.extend(wu16(setFile[2]*0x2000)) # Compression
-                newheader.extend(wu16(setFile[3])) # Special "ID"
-                newheader.extend(wu32(0))
-                fileLength += setFile[1]
-                fileLength += get_align_difference(setFile[1])
-    if not effModel:
-        padding = bytearray(get_align_difference(headerLength)) # Alignment
-        newheader.extend(padding)
-    return newheader
-
-def append_file(input,databuffer,folder,compress=True):
-    with open(input, "rb") as input_file:
-        fileData = bytearray( input_file.read() )
-        fileSize = len(fileData)
-        if compress or folder == 8: # Game can go into an infinite loop otherwise
-            fileData = zlib.compress(fileData)
-            databuffer.extend(wu32(fileSize))
-            databuffer.extend(fileData)
-            fileSize = len(fileData)+4
-        else:
-            databuffer.extend(fileData)
-        input_file.close()
-    databuffer.extend(bytearray(get_align_difference(fileSize))) # PS2 games would take a bullet to be 0x800-aligned
-    return fileSize
-
-def insert_file(input, buf, compress=True):
-    return -1
-
 def rebuild(folder,output,model=False,compress=True,useFilelist=True):
     databuffer = bytearray(0) # This will store file data
     headerarray = []
     effModel = False
-    if model and not Path(f"{folder}/filelist.id"): # 9/0 (game/eff/eff.bin) is a unique case
+    if model and not Path(f"{folder}/filelist.id").exists(): # 9/0 (game/eff/eff.bin) is a unique case
         effModel = True
+        compress = False
 
     lines = [] # Set up our filelist
-    if useFilelist and not model:
+    if useFilelist:
         lines = parse_filelist("./filelist.txt")
 
-    with open(f"{Path(folder)}/filelist.id", "rb") as id_file:
-        idArray = bytearray( id_file.read() ) # For the "ID" values
+    idArray = []
+    if not effModel and Path(f"{folder}/filelist.id").exists():
+        with open(f"{Path(folder)}/filelist.id", "rb") as id_file:
+            idArray = bytearray( id_file.read() ) # For the "ID" values
 
-    if useFilelist and not model:
+    if useFilelist:
         filePath = Path()
         for i in range(len(lines)):
+            j = -1
             for j in range(len(lines[i])):
                 curFile = lines[i][j]
                 filePath = Path(f"{folder}/{curFile[2]}/{curFile[3]}") # Get path of current file
@@ -333,7 +405,7 @@ def rebuild(folder,output,model=False,compress=True,useFilelist=True):
                 while len(headerarray[int(curFile[0])]) <= int(curFile[1]):
                     headerarray[int(curFile[0])].append([])
                 if filePath.exists():
-                    fileSize = append_file(filePath,databuffer,int(curFile[0]),compress) # Append file to data buffer
+                    fileSize = append_file(filePath,databuffer,int(curFile[0]),compress,effModel) # Append file to data buffer
                     getFile = headerarray[int(curFile[0])][int(curFile[1])]
                     getFile.append(0) # We don't use file offsets in the header reassembly method
                     getFile.append(fileSize)
@@ -346,30 +418,37 @@ def rebuild(folder,output,model=False,compress=True,useFilelist=True):
                         print(f"Please wait. {j+1} files complete...", end="\r", flush=True)
                     if j > 499 and j == len(lines[i]) - 1:
                         print(f"Please wait. {j+1} files complete.  ")
-            print(f"Folder {i} scanned: {j+1} files")
+            print(f"Folder {i} scanned: {j+1} file(s)")
     else:
         for i in sorted(Path(folder).iterdir(),key=lambda a: numsort(a.stem)): # Sort properly by number
+            curFile = -1
             if i.is_dir() and not i.is_file() and i.stem.isnumeric(): # And we only want folders with numeric names
                 curFolder = int(i.stem)
                 while len(headerarray) <= curFolder: # Make sure the appropriate array exists!!
                     headerarray.append([])
                 for j in sorted(Path(i).iterdir(),key=lambda b: numsort(b.stem)): # Same for files
-                    if j.is_file() and not j.is_dir() and j.stem.isnumeric(): # If I had to guess recursion probably isn't a thing
-                        curFile = int(j.stem)
+                    if j.is_file() and not j.is_dir(): # If I had to guess recursion probably isn't a thing
+                        if j.stem.isnumeric(): # Model files are labeled
+                            curFile = int(j.stem)
+                        else:
+                            curFile = curFile+1
                         while len(headerarray[curFolder]) <= curFile:
                             headerarray[curFolder].append([])
                         getFile = headerarray[curFolder][curFile]
-                        fileSize = append_file(j,databuffer,curFolder,compress) # Append file to data buffer
+                        fileSize = append_file(j,databuffer,curFolder,compress,effModel) # Append file to data buffer
                         getFile.append(0) # See above
                         getFile.append(fileSize)
                         getFile.append(int(compress))
-                        getFile.append(idArray.pop(0))
+                        if len(idArray) > 0: # effModel doesn't know about this
+                            getFile.append(idArray.pop(0))
+                        else:
+                            getFile.append(0)
                     if not effModel: # Progress report for folders with over 500 files
                         if curFile >= 499 and (curFile+1)%100 == 0: # Just so the user knows we're not stuck
                             print(f"Please wait. {curFile+1} files complete...", end="\r", flush=True)
                 if curFile >= 499:
                     print(f"Please wait. {curFile+1} files complete.  ")
-                print(f"Folder {curFolder} scanned: {curFile+1} files")
+                print(f"Folder {curFolder} scanned: {curFile+1} file(s)")
     
     fileheader = rebuild_header(headerarray,effModel) # Build the header
 
@@ -381,60 +460,88 @@ def rebuild(folder,output,model=False,compress=True,useFilelist=True):
 
 parser = argparse.ArgumentParser(description='Phantom Blood PS2 BIN Extractor/Rebuilder') # QuickBMS doesn't know what these are
 parser.add_argument("inpath", help="File Input (BIN/Folder)") # But I do
-parser.add_argument("-o", "--outpath", help="Optional. The name used for the output folder or file.")
-parser.add_argument("-nc", "--nocompress", action="store_true", help="Optional. Disables ZLib compression on files within the BIN.") # For if you want the chunkiest possible game directory
-parser.add_argument("-m", "--model", action="store_true", help="Optional. Indicates a BIN file is formatted for model files.") # There are BIN files inside BIN files. It gets weirder
-parser.add_argument("-qb", "--qbextensions", action="store_true", help="Optional. Gives PGM and DAT extensions in place of TEX/TX2 and LXE.") # For compatibility and nostalgia
+parser.add_argument("-o", "--outpath", type=str, default="", help="Optional. The name used for the output folder or file.")
+parser.add_argument("-nc", "--nocompress", action="store_true", help="Optional. BIN output only. Disables ZLib compression on files within the BIN.") # For if you want the chunkiest possible game directory
+parser.add_argument("-m", "--model", action="store_true", help="Optional. Indicates a BIN file or folder is formatted as a model file.") # There are BIN files inside BIN files. It gets weirder
+parser.add_argument("-qb", "--qbextensions", action="store_true", help="Optional. BIN input only. Gives PGM and DAT extensions in place of TEX/TX2 and LXE.") # For compatibility and nostalgia
 parser.add_argument("-nl", "--nolist", action="store_true", help="Optional. Ignores the provided file list, if available.") # Ditto
-parser.add_argument("-fo", "--folder", type=int, default="-1", help="Optional. Only extracts files from the desired folder.") # Ditto
-parser.add_argument("-fi", "--file", type=int, default="-1", help="Optional. Only extracts the desired zero-indexed file from a folder.") # Ditto
+parser.add_argument("-fo", "--folder", type=int, default="-1", help="Optional. Extracts files from the desired folder, or specifies insertion folder.") # Ditto
+parser.add_argument("-fi", "--file", type=int, default="-1", help="Optional. Extracts the desired file from a folder, or specifies insertion file.") # Ditto
+parser.add_argument("-i", "--insert", type=str, default="", help="Optional. Indicates the file to insert at the provided folder and file number.") # Ditto
+
 args = parser.parse_args()
 
-if not Path("./filelist.txt").is_file(): # If we don't have a file list, we don't have it
-    args.nolist = True
+compress = not args.nocompress # For convenience
+filelist = not args.nolist
+if args.model or not Path("./filelist.txt").is_file(): # If we don't have a file list, we don't have it
+    filelist = False # And if we're handling the file as a model we can't use the list anyway
+if args.folder == -1: # Let's not look for a file without a folder to look in
+    args.file = -1
+if args.file == -1 or not (Path(args.insert).is_file() and not Path(args.insert).is_dir()):
+    args.insert = False # And we can't insert anything if we don't know where to look
 
-if Path(args.inpath).is_file() and not Path(args.inpath).is_dir(): # BIN input is assumed   
+if Path(args.inpath).is_file() and not Path(args.inpath).is_dir(): # BIN input is assumed
     with open(args.inpath, "rb") as input_file:
-        input_file_buffer = bytearray( input_file.read() )
-        if args.outpath:
-            outpath = args.outpath + "/"
+        input_buffer = bytearray( input_file.read() )
+
+        outpath = "./"
+        if len(args.outpath) > 0: # Outpath takes priority!!
+            outpath += args.outpath
+        elif args.insert: # After that is insertion, since that is based on an existing file
+            outpath = (f"{Path(args.inpath).parent}/{Path(args.inpath).stem}_modified{Path(args.inpath).suffix}")
+        elif not args.folder == -1: # Then check for individual folder/file...
+            if args.file == -1: # We can get away with just sending an individual file to the input directory
+                if args.model: # If we have a model file, we should specify it.
+                    outpath = (f"{Path(outpath).parent}/model-{Path(args.inpath).stem}_{args.folder}")
+                else:
+                    outpath = (f"{Path(outpath).parent}/{Path(args.inpath).stem}_{args.folder}")
         else:
-            if args.model:
-                outpath = (f"{Path(args.inpath).parent}/model-{Path(args.inpath).stem}/")
-            else:
-                if not args.folder == -1:
-                    if not args.file == -1:
-                        outpath = (f"{Path(args.inpath).parent}/")
+            outpath = (f"{Path(args.inpath).parent}/{Path(args.inpath).stem}") # Finally, the default case.
+
+        if not args.insert and not (len(args.outpath) > 0 and not args.file == -1):
+            if not outpath == "./": # .// would look strange in the output
+                outpath += "/"
+
+        output_folder = outpath.rsplit("/",1)[0]+"/" # Split output into folder and filename
+        output_file = outpath.rsplit("/",1)[1]
+
+        if args.insert: # Insertion needs the most parts to work. Let's handle that first
+            Path(output_folder).mkdir(parents=True,exist_ok=True) # Make the necessary folder
+            ins = insert_file(input_buffer,args.insert,outpath,args.folder,args.file,args.model,compress)
+            if ins == 0: # That's right, we're using status codes now. Deal with it
+                print(f"Successfully inserted {args.insert} into {outpath}")
+        else:
+            if not args.model and not (len(args.outpath) > 0 and not args.file == -1): # Do NOT make "model-/"!
+                Path(output_folder).mkdir(parents=True,exist_ok=True)
+            if not args.folder == -1: # Folder/file extraction is next...
+                if not args.file == -1: # Individual file
+                    ex = extract_file(input_buffer,output_folder,args.folder,args.file,args.model,filelist,args.qbextensions,output_file)
+                    if ex == 0:
+                        print(f"Successfully extracted file {args.folder}/{args.file} to {outpath}")
+                else: # Folder extraction
+                    if args.model and ru32(input_buffer,0x08) != 0x20031205: # We know how many files are in an effModel folder
+                        file_count = 4
+                        for i in range(file_count): # Or at least we know the maximum.
+                            if ru32(input_buffer,0x04+i*0x04) == 0: # So if we find a file with size 0, we have our file count
+                                file_count = i
                     else:
-                        outpath = (f"{Path(args.inpath).parent}/{Path(args.inpath).stem}_{args.folder}/")
-                else:
-                    outpath = (f"{Path(args.inpath).parent}/{Path(args.inpath).stem}/")
-        Path(outpath).mkdir(parents=True,exist_ok=True)
-        if not args.folder == -1:
-            if not args.file == -1:
-                extract_file(input_file_buffer,outpath,args.folder,args.file,args.model,not args.nolist,args.qbextensions)
-            else:
-                if args.model and ru32(input_file_buffer,0x08) != 0x20031205:
-                    file_count = 4
-                else:
-                    file_count = ru32(input_file_buffer,0x14+(0x10*args.folder))
-                for i in range(file_count):
-                    extract_file(input_file_buffer,outpath,args.folder,i,args.model,not args.nolist,args.qbextensions,True)
-                print(f"Successfully extracted folder {args.folder}")
-        else:
-            unpack(input_file_buffer, outpath, args.model, not args.nolist, args.qbextensions)
-            print(f"Unpacked BIN to {outpath}")
+                        file_count = ru32(input_buffer,0x14+(0x10*args.folder)) # For regular files, we have to look
+                    for i in range(file_count): # Folder extraction. Iterate over files in the folder
+                        ex = extract_file(input_buffer,output_folder,args.folder,i,args.model,filelist,args.qbextensions,output_file)
+                    if ex == 0:
+                        print(f"Successfully extracted folder {args.folder} to {outpath}")
+            else: # Otherwise, it's time for the standard unpack
+                un = unpack(input_buffer, output_folder, args.model, filelist, args.qbextensions)
+                if un == 0:
+                    print(f"Successfully unpacked BIN to {output_folder}")
         input_file.close()
 
-
 elif Path(args.inpath).is_dir(): # BIN output is assumed
-    if args.outpath:
+    if args.outpath: # Outpath takes priority, again
         outpath = args.outpath
-    else:
+    else: # Otherwise, nothing better to do than the default
         outpath = (f"{Path(args.inpath).stem}.bin")
-    compress = not args.nocompress
-    if args.model:
-        args.nolist = True
-        compress = False
-    rebuild(args.inpath, outpath, args.model, compress, not args.nolist)
-    print(f"Rebuilt BIN to {outpath}")
+
+    re = rebuild(args.inpath, outpath, args.model, compress, filelist) # Rebuild time.
+    if re == 0:
+        print(f"Successfully rebuilt BIN to {outpath}")
