@@ -356,12 +356,7 @@ def unpack(buf, folder, model=False, useFilelist=True, qbFile=False):
             fileData = get_file_data(buf,getFile[0],getFile[1],getFile[2]) # Put the file data in a buffer
             idArray.extend(wu08(getFile[3])) # Also add the ID to the corresponding array
             if len(fileData) > 0: # Does the file exist?
-                curFolder = i
-                if i == 12 and j == 0 and getFile[0] == 0x29D2000: # We already got the switched file
-                    curFolder = 27 # But we still need the switched name
-                elif i == 27 and j == 0 and getFile[0] == 0x52A800:
-                    curFolder = 12
-                outpath = get_file_name(fileData,curFolder,j,lines,model,qbFile) # Get the best file name
+                outpath = get_file_name(fileData,i,j,lines,model,qbFile) # Get the best file name
                 Path(f"{folder}{outpath}").parent.mkdir(parents=True,exist_ok=True) # Make the folder required
                 with open(f"{folder}{outpath}", "wb") as outfile:
                     for byte in fileData:
