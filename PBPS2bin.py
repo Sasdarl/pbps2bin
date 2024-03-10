@@ -121,11 +121,13 @@ def parse_header(buf,folderCount,effModel=False): # Convert the header into a tw
             else:
                 dataOffset = ru32(buf,fileOffset)
                 if i == 12 and j == 0 and dataOffset == 0x29D2000:
-                    fileOffset = 0x10+(0x10*27) # The aforementioned header fix
+                    fileOffset = ru32(buf,0x10+(0x10*27)) # The aforementioned header fix
                     fileAdjust = True
+                    dataOffset = ru32(buf,fileOffset)
                 elif i == 27 and j == 0 and dataOffset == 0x52A800:
-                    fileOffset = 0x10+(0x10*12) # We check the offset because in any other case than vanilla we'll have already fixed it
+                    fileOffset = ru32(buf,0x10+(0x10*12)) # We check the offset because in any other case than vanilla we'll have already fixed it
                     fileAdjust = True
+                    dataOffset = ru32(buf,fileOffset)
                 compressed = (ru16(buf,fileOffset+8)&0x2000) # Check compression
                 compressed >>= 13
                 filearray.append(dataOffset)
@@ -133,7 +135,8 @@ def parse_header(buf,folderCount,effModel=False): # Convert the header into a tw
                 filearray.append(compressed)
                 filearray.append(ru08(buf,fileOffset+10))
                 if fileAdjust:
-                    fileOffset = 0x10+(0x10*i)
+                    fileOffset = ru32(buf,0x10+(0x10*i))
+                    fileAdjust = False
                 fileOffset += 0x10
             outarray[i].append(filearray)
         folderOffset += 0x10
