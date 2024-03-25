@@ -27,7 +27,17 @@ def deZLib(buf, offset, size): # Decompress a ZLib-compressed file
     decompressed = zlib.decompress(localBuffer)
     return bytes(decompressed) # Array of byte integers
 
-def determineExtension(buf, qbFile): # QuickBMS's extensions are iconic but I'm in charge here so we use internal filenames by default
+def get_align_difference(num, alignment=0x800): # Get alignment difference for padding purposes
+    difference = (alignment-(num%alignment))%alignment
+    return difference
+
+def get_file_checksum(buffer): # Calculate XOR checksum for a file
+    checksum = 0x00
+    for byte in buffer: # Say goodbye to our Big O
+        checksum ^= byte
+    return checksum
+
+def determine_extension(buf, qbFile): # QuickBMS's extensions are iconic but I'm in charge here so we use internal filenames by default
     magic = buf[0:4]
     if magic[0:3].isalnum():
         magicString = magic.decode("UTF-8").rstrip("\x00")
@@ -70,12 +80,8 @@ def numsort(str): # Because default numeric string sorting is the worst
     if len(numstr) > 0:
         return int(numstr) # Let's just get an integer out of all of the numeric characters
     else:
-        return -1 # And if not, lowest priority
+        return -1 # And if there are none, lowest priority
 
-def get_align_difference(num, alignment=0x800): # Get alignment difference for padding purposes
-    difference = (alignment-(num%alignment))%alignment
-    return difference
-    
 def parse_filelist(infile): # Convert the filelist into a two-dimensional array
     outarray = []
     with open(infile) as filelist:
@@ -95,7 +101,7 @@ def parse_filelist(infile): # Convert the filelist into a two-dimensional array
 
 def parse_header(buf,folderCount,effModel=False): # Convert the header into a two-dimensional array
     outarray = []
-    fileAdjust = False # 12/0 and 27/0 are listed at the wrong locations in the header
+    fileAdjust = False # 12/0 and 27/0 are listed at the wrong locations in the vanilla header
     if effModel:
         folderOffset = 0x04
         dataOffset = folderOffset+(folderCount*0x10)
@@ -110,7 +116,7 @@ def parse_header(buf,folderCount,effModel=False): # Convert the header into a tw
             fileOffset = ru32(buf,folderOffset) # This only needs to exist in files with variable folders
             fileCount = ru32(buf,folderOffset+4)
         for j in range(fileCount):
-            filearray = [] # [File offset, file size, compressed, ID]
+            filearray = [] # [File offset, file size, compressed, checksum]
             if effModel:
                 filearray.append(dataOffset)
                 filearray.append(ru32(buf,fileOffset))
@@ -130,7 +136,7 @@ def parse_header(buf,folderCount,effModel=False): # Convert the header into a tw
                     dataOffset = ru32(buf,fileOffset)
                 compressed = (ru16(buf,fileOffset+8)&0x2000) # Check compression
                 compressed >>= 13
-                filearray.append(dataOffset)
+                filearray.append(dataOffset) # Add each value to the file's array entry
                 filearray.append(ru32(buf,fileOffset+4))
                 filearray.append(compressed)
                 filearray.append(ru08(buf,fileOffset+10))
@@ -157,7 +163,7 @@ def get_file_data(buf,offset,size,compressed=0): # Get (and decompress if necess
     return fileData
 
 def get_file_name(buffer,folder,file,filelist=[],model=False,qbFile=False,noFolder=False): # Determine the path where the file should be stored
-    outext = determineExtension(buffer,qbFile)
+    outext = determine_extension(buffer,qbFile)
     if model:
         if file == 0: # Might as well name them
             outpath = (f"model.{outext}")
@@ -184,19 +190,19 @@ def append_file(input,databuffer,folder,compress=True,effModel=False): # Add fil
     with open(input, "rb") as input_file:
         fileData = bytearray( input_file.read() )
         fileSize = len(fileData)
-        if not effModel and (compress or folder == 8): # Game can go into an infinite loop otherwise
+        if not effModel and (compress or folder == 8): # Game can go into an infinite loop if we don't force folder 8
             fileData = zlib.compress(fileData)
-            databuffer.extend(wu32(fileSize))
+            fileData = wu32(fileSize) + fileData
             databuffer.extend(fileData)
-            fileSize = len(fileData)+4
+            fileSize = len(fileData)
         else:
             databuffer.extend(fileData)
         input_file.close()
     if not effModel:
         databuffer.extend(bytearray(get_align_difference(fileSize))) # PS2 games would take a bullet to be 0x800-aligned
-    return fileSize
+    return (fileSize,get_file_checksum(fileData))
 
-def modify_header(buf, folder, file, newsize, compress=True, effModel=False): # Adjust header to change one file's size
+def modify_header(buf, folder, file, newsize, compress=True, checksum=-1, effModel=False): # Adjust header to change one file
     if effModel:
         fileOffset = 0x04+(folder*0x10)+(file*0x04) # List of sizes
         buf[fileOffset:fileOffset+4] = wu32(newsize) # Just find the one we need and change it
@@ -218,6 +224,8 @@ def modify_header(buf, folder, file, newsize, compress=True, effModel=False): # 
                             buf[curFile+8:curFile+10] = wu16(0x2000)
                         else:
                             buf[curFile+8:curFile+10] = wu16(0)
+                        if checksum != -1:
+                            buf[curFile+10:curFile+11] = wu08(checksum)
                 else: # This runs for all files after the replacement
                     curFileOffset = ru32(buf,curFile)
                     buf[curFile:curFile+4] = wu32(curFileOffset+difference) # Add the difference
@@ -251,7 +259,7 @@ def rebuild_header(headerarray, effModel=False): # Reconstruct a BIN file header
             newheader.extend(wu32(setFile[1])) # The special case eff.bin only uses file sizes
             if not effModel:
                 newheader.extend(wu16(setFile[2]*0x2000)) # Compression
-                newheader.extend(wu16(setFile[3])) # Special "ID"
+                newheader.extend(wu16(setFile[3])) # Checksum
                 newheader.extend(wu32(0))
                 fileLength += setFile[1] # Increment by file size including padding
                 fileLength += get_align_difference(setFile[1])
@@ -272,7 +280,6 @@ def extract_file(buf, folder, lookFolder, lookFile, model=False, useFilelist=Tru
         return -1
     if model and ru32(buf,0x08) != 0x20031205: # 9/0 (game/eff/eff.bin) is a unique case
         effModel = True
-        compress = False
 
     lines = [] # Set up our filelist
     if useFilelist:
@@ -325,10 +332,10 @@ def insert_file(buf, input, output, repFolder, repFile, model=False, compress=Tr
         afterBuffer = buf[dataOffset+fileSizeRounded::] # Buffer for everything after the original file
 
     newBuffer = buf[0:dataOffset] # Buffer for everything before the original file
-    fileSize = append_file(Path(input),newBuffer,repFolder,compress,effModel) # Append the new file to the first buffer
+    (fileSize,checksum) = append_file(Path(input),newBuffer,repFolder,compress,effModel) # Append the new file to the first buffer
     newBuffer.extend(afterBuffer) # And stick the second buffer back on afterward
+    modify_header(newBuffer,repFolder,repFile,fileSize,compress,checksum,effModel) # Finally, adjust the header
 
-    modify_header(newBuffer,repFolder,repFile,fileSize,compress,effModel) # Finally, adjust the header
     with open(output, "wb") as output_file:
         for byte in newBuffer:
             output_file.write(struct.pack("B",byte))
@@ -336,7 +343,6 @@ def insert_file(buf, input, output, repFolder, repFile, model=False, compress=Tr
 
 def unpack(buf, folder, model=False, useFilelist=True, qbFile=False):
     folderCount = ru32(buf,0x00) # Number of folders
-    idArray = bytearray(0) # For storing an unknown and unused value tentatively dubbed the ID
     effModel = False
     if model and ru32(buf,0x08) != 0x20031205: # 9/0 (game/eff/eff.bin) is a unique case
         effModel = True
@@ -354,7 +360,6 @@ def unpack(buf, folder, model=False, useFilelist=True, qbFile=False):
         for j in range(len(files[i])):
             getFile = files[i][j]
             fileData = get_file_data(buf,getFile[0],getFile[1],getFile[2]) # Put the file data in a buffer
-            idArray.extend(wu08(getFile[3])) # Also add the ID to the corresponding array
             if len(fileData) > 0: # Does the file exist?
                 outpath = get_file_name(fileData,i,j,lines,model,qbFile) # Get the best file name
                 Path(f"{folder}{outpath}").parent.mkdir(parents=True,exist_ok=True) # Make the folder required
@@ -366,30 +371,22 @@ def unpack(buf, folder, model=False, useFilelist=True, qbFile=False):
                     print(f"Please wait. {j+1} files complete...", end="\r", flush=True)
                 if j > 499 and j == len(files[i]) - 1:
                     print(f"Please wait. {j+1} files complete.  ")
-
-    if not effModel:
-        outid = (f"{folder}filelist.id")
-        with open(outid, "wb") as id_file: # Write the ID array
-            id_file.write(idArray)
-            id_file.close()
+    if effModel:
+        with open(f"{folder}effModel", "wb") as eff_file: # We will create an empty file to indicate this
+            eff_file.close()
     return 0
 
 def rebuild(folder,output,model=False,compress=True,useFilelist=True):
     databuffer = bytearray(0) # This will store file data
     headerarray = []
     effModel = False
-    if model and not Path(f"{folder}/filelist.id").exists(): # 9/0 (game/eff/eff.bin) is a unique case
+    if model and (Path(f"{folder}/effModel").exists() or not Path(f"{folder}/filelist.id").exists()): # 9/0 (game/eff/eff.bin) is a unique case
         effModel = True
         compress = False
 
     lines = [] # Set up our filelist
     if useFilelist:
         lines = parse_filelist("./filelist.txt")
-
-    idArray = []
-    if not effModel and Path(f"{folder}/filelist.id").exists():
-        with open(f"{Path(folder)}/filelist.id", "rb") as id_file:
-            idArray = bytearray( id_file.read() ) # For the "ID" values
 
     if useFilelist:
         filePath = Path()
@@ -403,12 +400,12 @@ def rebuild(folder,output,model=False,compress=True,useFilelist=True):
                 while len(headerarray[int(curFile[0])]) <= int(curFile[1]):
                     headerarray[int(curFile[0])].append([])
                 if filePath.exists():
-                    fileSize = append_file(filePath,databuffer,int(curFile[0]),compress,effModel) # Append file to data buffer
+                    (fileSize,checksum) = append_file(filePath,databuffer,int(curFile[0]),compress,effModel) # Append file to data buffer
                     getFile = headerarray[int(curFile[0])][int(curFile[1])]
                     getFile.append(0) # We don't use file offsets in the header reassembly method
                     getFile.append(fileSize)
                     getFile.append(int(compress))
-                    getFile.append(idArray.pop(0)) # We are assuming the filelist is sorted. "Be careful," I would say if this mattered
+                    getFile.append(checksum)
                 else:
                     print(f"File {filePath} does not exist! Skipping...")
                 if not effModel: # Progress report for folders with over 500 files
@@ -433,17 +430,16 @@ def rebuild(folder,output,model=False,compress=True,useFilelist=True):
                         while len(headerarray[curFolder]) <= curFile:
                             headerarray[curFolder].append([])
                         getFile = headerarray[curFolder][curFile]
-                        fileSize = append_file(j,databuffer,curFolder,compress,effModel) # Append file to data buffer
+                        (fileSize,checksum) = append_file(j,databuffer,curFolder,compress,effModel) # Append file to data buffer
                         getFile.append(0) # See above
                         getFile.append(fileSize)
                         getFile.append(int(compress))
-                        if len(idArray) > 0: # effModel doesn't know about this
-                            getFile.append(idArray.pop(0))
-                        else:
+                        if effModel: # effModel doesn't know about this
                             getFile.append(0)
-                    if not effModel: # Progress report for folders with over 500 files
-                        if curFile >= 499 and (curFile+1)%100 == 0: # Just so the user knows we're not stuck
-                            print(f"Please wait. {curFile+1} files complete...", end="\r", flush=True)
+                        else:
+                            getFile.append(checksum)
+                            if curFile >= 499 and (curFile+1)%100 == 0: # Just so the user knows we're not stuck
+                                print(f"Please wait. {curFile+1} files complete...", end="\r", flush=True)
                 if curFile >= 499:
                     print(f"Please wait. {curFile+1} files complete.  ")
                 print(f"Folder {curFolder} scanned: {curFile+1} file(s)")
